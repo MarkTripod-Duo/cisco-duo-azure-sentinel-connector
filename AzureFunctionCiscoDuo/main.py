@@ -8,13 +8,15 @@ import logging
 import time
 import re
 import math
-from typing import Iterable, List
+from typing import Iterable
 import duo_client
 
 import azure.functions as func
 
 from sentinel_connector import AzureSentinelConnector
 from state_manager import StateManager
+
+from activity_log import ActivityLog
 
 
 class DuoException(Exception):
@@ -49,7 +51,7 @@ if not match:
 def main(mytimer: func.TimerRequest) -> None:
     """Program entry point."""
     logging.info('Starting script')
-    start_ts = int(time.time())
+    start_ts = math.floor(time.time())
     admin_api = duo_client.Admin(ikey=CISCO_DUO_INTEGRATION_KEY, skey=CISCO_DUO_SECRET_KEY,
                                  host=CISCO_DUO_API_HOSTNAME, )
     sentinel = AzureSentinelConnector(log_analytics_uri=LOG_ANALYTICS_URI, workspace_id=WORKSPACE_ID,
@@ -59,7 +61,8 @@ def main(mytimer: func.TimerRequest) -> None:
 
     if 'activity' in log_types:
         state_manager = StateManager(FILE_SHARE_CONN_STRING, file_path='cisco_duo_activity_logs_last_ts.txt')
-        process_activity_logs(admin_api, state_manager=state_manager, sentinel=sentinel)
+        activity_log = ActivityLog(admin_api=admin_api, state_manager=state_manager, sentinel=sentinel)
+        activity_log.process_activity_logs(start_ts=start_ts)
         if check_if_script_runs_too_long(start_ts):
             logging.info('Script is running too long. Saving progress and exit.')
             return
@@ -95,6 +98,9 @@ def main(mytimer: func.TimerRequest) -> None:
     if 'offline_enrollment' in log_types:
         state_manager = StateManager(FILE_SHARE_CONN_STRING, file_path='cisco_duo_offline_enrollment_logs_last_ts.txt')
         process_offline_enrollment_logs(admin_api, start_ts, state_manager=state_manager, sentinel=sentinel)
+        if check_if_script_runs_too_long(start_ts):
+            logging.info('Script is running too long. Saving progress and exit.')
+            return
 
     logging.info('Script finished. Sent events: {}'.format(sentinel.successful_sent_events_number))
 
@@ -436,13 +442,13 @@ def process_offline_enrollment_logs(admin_api: duo_client.Admin, start_ts, state
         mintime += 1
         logging.info('Making offline_enrollment logs request: mintime={}'.format(mintime))
         try:
-            events = make_offline_enrollment_logs_request(admin_api, mintime)
+            events = admin_api.get_offline_log(mintime)
         except DuoException as ex:
             logging.warning('Error while getting offline_enrollment logs - {}'.format(ex))
             if ex.status == 429:
                 logging.warning('429 exception occurred, trying retry after 60 seconds')
                 time.sleep(60)
-                events = make_offline_enrollment_logs_request(admin_api, mintime)
+                events = admin_api.get_offline_log(mintime)
 
         if events is not None:
             logging.info('Obtained {} offline_enrollment events'.format(len(events)))
@@ -470,13 +476,13 @@ def get_offline_enrollment_logs(admin_api: duo_client.Admin, mintime: int) -> It
     logging.info('Making offline_enrollment logs request: mintime={}'.format(mintime))
     events: list = []
     try:
-        events = make_offline_enrollment_logs_request(admin_api, mintime)
+        events = admin_api.get_offline_log(mintime)
     except DuoException as err:
         logging.warning('Error while getting offline_enrollment logs- {}'.format(err))
         if err.status == 429:
             logging.warning('429 exception occurred, trying retry after 60 seconds')
             time.sleep(60)
-            events = make_offline_enrollment_logs_request(admin_api, mintime)
+            events = admin_api.get_offline_log(mintime)
 
     if events is not None:
         logging.info('Obtained {} offline_enrollment events'.format(len(events)))
@@ -486,127 +492,6 @@ def get_offline_enrollment_logs(admin_api: duo_client.Admin, mintime: int) -> It
     return events
 
 
-def process_activity_logs(admin_api: duo_client.Admin, start_ts, state_manager: StateManager,
-                          sentinel: AzureSentinelConnector) -> None:
-    """Process activity logs."""
-    limit = 1000
-    logging.info('Start processing activity logs')
-
-    logging.info('Getting last timestamp')
-    mintime = state_manager.get()
-    if mintime:
-        logging.info('Last timestamp is {}'.format(mintime))
-        mintime = int(mintime) + 1
-    else:
-        logging.info('Last timestamp is not known. Getting data for last 24h')
-        mintime = math.floor((time.time() - 86400) * 1000)
-
-    maxtime = math.floor((time.time() - 120) * 1000)
-    diff = maxtime - mintime
-    max_window = int(MAX_SYNC_WINDOW_PER_RUN_MINUTES) * 60000
-    if diff > max_window:
-        maxtime = mintime + max_window
-        logging.warning('Ingestion is lagging for activity logs, limiting synchronization window to {}'.format(
-                max_window))
-
-    events, next_offset = get_activity_logs(admin_api, mintime, maxtime)
-
-    for event in events:
-        sentinel.send(event)
-
-    sentinel.flush()
-
-    logging.info('Saving activity logs last timestamp {}'.format(maxtime))
-    state_manager.post(str(maxtime))
-
-    while len(events) == limit:
-        if next_offset and next_offset is not None:
-            next_offset = ','.join(next_offset)
-        else:
-            break
-        logging.info('Making activity logs request: next_offset={}'.format(next_offset))
-
-        response = {}
-        try:
-            response = get_activity_logs(admin_api=admin_api, mintime=mintime, maxtime=maxtime)
-            logging.info('Response received {}'.format(response))
-        except DuoException as ex:
-            logging.warning('Error in while loop while getting authentication logs- {}'.format(ex))
-            if ex.status == 429:
-                logging.info('429 exception occurred, trying retry after 60 seconds')
-                time.sleep(60)
-                response = get_activity_logs(admin_api=admin_api, mintime=mintime, maxtime=maxtime)
-        if response is not None:
-            events = response['items']
-            logging.info('Obtained {} activity events'.format(len(events)))
-        else:
-            logging.info('returned response as Null')
-
-        for event in events:
-            sentinel.send(event)
-        sentinel.flush()
-
-        logging.info('Saving activity logs last timestamp {}'.format(maxtime))
-        state_manager.post(str(maxtime))
-
-        if check_if_script_runs_too_long(start_ts):
-            logging.info('Script is running too long. Saving progress and exit.')
-            return
-
-
-def get_activity_logs(admin_api: duo_client.Admin, mintime: int, maxtime: int) -> tuple:
-    """Retrieve user authentication logs.
-
-        Args:
-            admin_api (duo_client.Admin): Duo Admin API instance.
-            mintime (int): Oldest log timestamp in milliseconds.
-            maxtime (int): Newest log timestamp in milliseconds.
-
-        Returns:
-            tuple: Tuple containing user activity logs and next timestamp offset in milliseconds.
-    """
-    logging.info('Making activity logs request: mintime={}, maxtime={}'.format(mintime, maxtime))
-    res = {}
-    try:
-        res = make_activity_logs_request(admin_api, mintime, maxtime)
-    except DuoException as status:
-        logging.warning('Error while getting activity logs- {}'.format(status))
-        if status.status == 429:
-            logging.warning('429 exception occurred, trying retry after 60 seconds')
-            time.sleep(60)
-            res = make_activity_logs_request(admin_api, mintime, maxtime)
-
-    if res is not None:
-        events = res['items']
-        next_offset = res['metadata']['next_offset']
-        logging.info('Obtained {} auth events'.format(len(events)))
-    else:
-        logging.error('Error while getting authentication logs')
-        events = None
-        next_offset = None
-    return events, next_offset
-
-
-def make_offline_enrollment_logs_request(admin_api: duo_client.Admin, mintime) -> List[dict]:
-    """Construct offline enrollment logs request using generic JSON API endpoint call"""
-    mintime = str(int(mintime))
-    params = {'mintime': mintime, }
-    response = admin_api.json_api_call('GET', '/admin/v1/logs/offline_enrollment', params, )
-    return response
-
-
-def make_activity_logs_request(admin_api: duo_client.Admin, mintime, maxtime) -> List[dict]:
-    """Construct offline enrollment logs request using generic JSON API endpoint call"""
-    mintime = str(int(mintime))
-    maxtime = str(int(maxtime))
-    params = {'mintime': mintime, 'maxtime': maxtime}
-    response = admin_api.json_api_call('GET', '/admin/vs/logs/activity', params, )
-    return response
-
-
 def check_if_script_runs_too_long(start_ts):
     """Check if difference between 'start_ts' and current time is greater than 'MAX_SCRIPT_EXEC_TIME_MINUTES'."""
-    now = math.floor(time.time())
-    duration = now - start_ts
-    max_duration = int(MAX_SCRIPT_EXEC_TIME_MINUTES * 60 * 0.85)
-    return duration > max_duration
+    return math.floor(time.time()) - start_ts > int(MAX_SCRIPT_EXEC_TIME_MINUTES * 60 * 0.85)

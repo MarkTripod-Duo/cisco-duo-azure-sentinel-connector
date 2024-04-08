@@ -1,5 +1,5 @@
 azure-functions==1.6.0
-duo-client==4.3.2
+duo-client~=5.3.0
 azure-storage-file-share==12.5.0
 six~=1.16.0
 requests~=2.31.0
