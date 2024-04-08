@@ -1,3 +1,8 @@
+"""
+Primary Cisco Duo Admin API Log endpoint program for Azure Sentinel data connector
+"""
+from __future__ import print_function, annotations
+
 import os
 import logging
 import time
@@ -52,6 +57,13 @@ def main(mytimer: func.TimerRequest) -> None:
 
     log_types = get_log_types()
 
+    if 'activity' in log_types:
+        state_manager = StateManager(FILE_SHARE_CONN_STRING, file_path='cisco_duo_activity_logs_last_ts.txt')
+        process_activity_logs(admin_api, state_manager=state_manager, sentinel=sentinel)
+        if check_if_script_runs_too_long(start_ts):
+            logging.info('Script is running too long. Saving progress and exit.')
+            return
+
     if 'trust_monitor' in log_types:
         state_manager = StateManager(FILE_SHARE_CONN_STRING, file_path='cisco_duo_trust_monitor_logs_last_ts.txt')
         process_trust_monitor_events(admin_api, state_manager=state_manager, sentinel=sentinel)
@@ -84,7 +96,7 @@ def main(mytimer: func.TimerRequest) -> None:
         state_manager = StateManager(FILE_SHARE_CONN_STRING, file_path='cisco_duo_offline_enrollment_logs_last_ts.txt')
         process_offline_enrollment_logs(admin_api, start_ts, state_manager=state_manager, sentinel=sentinel)
 
-    logging.info('Script finished. Sent events: {}'.format(sentinel.successfull_sent_events_number))
+    logging.info('Script finished. Sent events: {}'.format(sentinel.successful_sent_events_number))
 
 
 def get_log_types():
@@ -107,9 +119,9 @@ def process_trust_monitor_events(admin_api: duo_client.Admin, state_manager: Sta
         mintime = int(mintime) + 1
     else:
         logging.info('Last timestamp is not known. Getting data for last 24h')
-        mintime = int(time.time() - 86400) * 1000
+        mintime = math.floor(time.time() - 86400) * 1000
 
-    maxtime = int(time.time() - 120) * 1000
+    maxtime = math.floor(time.time() - 120) * 1000
     diff = maxtime - mintime
     max_window = int(MAX_SYNC_WINDOW_PER_RUN_MINUTES) * 60000
     if diff > max_window:
@@ -139,9 +151,9 @@ def process_auth_logs(admin_api: duo_client.Admin, start_ts, state_manager: Stat
         mintime = int(mintime) + 1
     else:
         logging.info('Last timestamp is not known. Getting data for last 24h')
-        mintime = int(time.time() - 86400) * 1000
+        mintime = math.floor(time.time() - 86400) * 1000
 
-    maxtime = int(time.time() - 120) * 1000
+    maxtime = math.floor(time.time() - 120) * 1000
     diff = maxtime - mintime
     max_window = int(MAX_SYNC_WINDOW_PER_RUN_MINUTES) * 60000
     if diff > max_window:
@@ -237,7 +249,7 @@ def process_admin_logs(admin_api: duo_client.Admin, start_ts, state_manager: Sta
         mintime = int(mintime) + 1
     else:
         logging.info('Last timestamp is not known. Getting data for last 24h')
-        mintime = int(time.time() - 86400)
+        mintime = math.floor(time.time() - 86400)
 
     last_ts = None
     events = get_admin_logs(admin_api, mintime)
@@ -320,7 +332,7 @@ def process_tele_logs(admin_api: duo_client.Admin, start_ts, state_manager: Stat
         mintime = int(mintime) + 1
     else:
         logging.info('Last timestamp is not known. Getting data for last 24h')
-        mintime = int(time.time() - 86400)
+        mintime = math.floor(time.time() - 86400)
 
     last_ts = None
 
@@ -403,7 +415,7 @@ def process_offline_enrollment_logs(admin_api: duo_client.Admin, start_ts, state
         mintime = int(mintime) + 1
     else:
         logging.info('Last timestamp is not known. Getting data for last 24h')
-        mintime = int(time.time() - 86400)
+        mintime = math.floor(time.time() - 86400)
 
     last_ts = None
 

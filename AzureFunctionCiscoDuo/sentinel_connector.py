@@ -7,8 +7,20 @@ import hmac
 import base64
 
 
+def _build_signature(workspace_id, shared_key, date, content_length, method, content_type, resource):
+    x_headers = 'x-ms-date:' + date
+    string_to_hash = method + "\n" + str(content_length) + "\n" + content_type + "\n" + x_headers + "\n" + resource
+    bytes_to_hash = bytes(string_to_hash, encoding="utf-8")
+    decoded_key = base64.b64decode(shared_key)
+    encoded_hash = base64.b64encode(
+            hmac.new(decoded_key, bytes_to_hash, digestmod=hashlib.sha256).digest()).decode()
+    authorization = "SharedKey {}:{}".format(workspace_id, encoded_hash)
+    return authorization
+
+
 class AzureSentinelConnector:
-    def __init__(self, log_analytics_uri, workspace_id, shared_key, log_type, queue_size=200, queue_size_bytes=25 * (2**20)):
+    def __init__(self, log_analytics_uri, workspace_id, shared_key, log_type, queue_size=200,
+                 queue_size_bytes=25 * (2**20)):
         self.log_analytics_uri = log_analytics_uri
         self.workspace_id = workspace_id
         self.shared_key = shared_key
@@ -18,7 +30,7 @@ class AzureSentinelConnector:
         self.queue_size_bytes = queue_size_bytes
         self._queue = []
         self._bulks_list = []
-        self.successfull_sent_events_number = 0
+        self.successful_sent_events_number = 0
 
     def send(self, event):
         self._queue.append(event)
@@ -53,24 +65,16 @@ class AzureSentinelConnector:
     def __exit__(self, type, value, traceback):
         self.flush()
 
-    def _build_signature(self, workspace_id, shared_key, date, content_length, method, content_type, resource):
-        x_headers = 'x-ms-date:' + date
-        string_to_hash = method + "\n" + str(content_length) + "\n" + content_type + "\n" + x_headers + "\n" + resource
-        bytes_to_hash = bytes(string_to_hash, encoding="utf-8")
-        decoded_key = base64.b64decode(shared_key)
-        encoded_hash = base64.b64encode(hmac.new(decoded_key, bytes_to_hash, digestmod=hashlib.sha256).digest()).decode()
-        authorization = "SharedKey {}:{}".format(workspace_id, encoded_hash)
-        return authorization
-
     def _post_data(self, workspace_id, shared_key, body, log_type):
         events_number = len(body)
         body = json.dumps(body)
         method = 'POST'
         content_type = 'application/json'
         resource = '/api/logs'
-        rfc1123date = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+        rfc1123date = datetime.datetime.now(tz=datetime.UTC).strftime('%a, %d %b %Y %H:%M:%S GMT')
         content_length = len(body)
-        signature = self._build_signature(workspace_id, shared_key, rfc1123date, content_length, method, content_type, resource)
+        signature = _build_signature(
+                workspace_id, shared_key, rfc1123date, content_length, method, content_type, resource)
         uri = self.log_analytics_uri + resource + '?api-version=2016-04-01'
 
         headers = {
@@ -86,12 +90,14 @@ class AzureSentinelConnector:
             logging.error("Error during sending events to Azure Sentinel: {}".format(err))
             raise err
         else:
-            if (response.status_code >= 200 and response.status_code <= 299):
+            if 200 <= response.status_code <= 299:
                 logging.info('{} events have been successfully sent to Azure Sentinel'.format(events_number))
-                self.successfull_sent_events_number += events_number
+                self.successful_sent_events_number += events_number
             else:
-                logging.error("Error during sending events to Azure Sentinel. Response code: {}".format(response.status_code))
-                raise Exception("Error during sending events to Azure Sentinel. Response code: {}".format(response.status_code))
+                logging.error(
+                        "Error during sending events to Azure Sentinel. Response code: {}".format(response.status_code))
+                raise Exception(
+                        "Error during sending events to Azure Sentinel. Response code: {}".format(response.status_code))
 
     def _check_size(self, queue):
         data_bytes_len = len(json.dumps(queue).encode())
