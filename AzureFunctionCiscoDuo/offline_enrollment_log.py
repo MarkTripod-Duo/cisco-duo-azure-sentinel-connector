@@ -7,7 +7,7 @@ import time
 import logging
 from singleton import Singleton
 from typing import Iterable
-from main import check_if_script_runs_too_long, MAX_SYNC_WINDOW_PER_RUN_MINUTES
+from main import check_if_script_runs_too_long
 from base import DuoLogBase, DuoException
 
 

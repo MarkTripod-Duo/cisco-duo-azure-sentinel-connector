@@ -18,9 +18,11 @@ class DuoException(Exception):
 
 
 class DuoLogBase:
+    """Base Cisco Duo Admin API log extraction endpoint template"""
 
     def __init__(self, admin_api: duo_client.Admin, state_manager: StateManager, sentinel: AzureSentinelConnector, ):
         """Initialize the Activity Log class"""
         self.admin_api = admin_api
         self.state_manager = state_manager
         self.sentinel = sentinel
+
